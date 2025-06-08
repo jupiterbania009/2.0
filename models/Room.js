@@ -8,8 +8,7 @@ const roomSchema = new mongoose.Schema({
     },
     name: {
         type: String,
-        required: true,
-        trim: true
+        required: true
     },
     host: {
         type: mongoose.Schema.Types.ObjectId,
@@ -20,6 +19,13 @@ const roomSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User'
     }],
+    isPrivate: {
+        type: Boolean,
+        default: true
+    },
+    password: {
+        type: String
+    },
     currentVideo: {
         url: String,
         title: String,
@@ -33,22 +39,20 @@ const roomSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
-    createdAt: {
-        type: Date,
-        default: Date.now
-    },
     lastActive: {
         type: Date,
         default: Date.now
     },
-    isPrivate: {
-        type: Boolean,
-        default: true
-    },
-    password: {
-        type: String,
-        default: null
+    createdAt: {
+        type: Date,
+        default: Date.now
     }
 });
+
+// Add indexes for better query performance
+roomSchema.index({ roomId: 1 });
+roomSchema.index({ host: 1 });
+roomSchema.index({ participants: 1 });
+roomSchema.index({ lastActive: 1 });
 
 module.exports = mongoose.model('Room', roomSchema); 
