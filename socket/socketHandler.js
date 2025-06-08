@@ -1,6 +1,9 @@
 const Room = require('../models/Room');
 const User = require('../models/User');
 
+// Store room states in memory for better performance
+const roomStates = new Map();
+
 const handleSocketConnection = (io, socket) => {
     console.log('New client connected:', socket.id);
 
@@ -16,16 +19,39 @@ const handleSocketConnection = (io, socket) => {
                 return;
             }
 
+            // Initialize room state if not exists
+            if (!roomStates.has(roomId)) {
+                roomStates.set(roomId, {
+                    currentVideo: room.currentVideo,
+                    isPlaying: false,
+                    currentTime: 0,
+                    lastUpdate: Date.now(),
+                    participants: new Set()
+                });
+            }
+
+            const roomState = roomStates.get(roomId);
+            roomState.participants.add(userId);
+
             socket.join(roomId);
+            
+            // Notify others in the room
             socket.to(roomId).emit('user_joined', {
                 userId,
-                room
+                room: {
+                    ...room.toObject(),
+                    participants: Array.from(roomState.participants).map(id => ({
+                        id,
+                        username: room.participants.find(p => p._id.toString() === id)?.username || 'Unknown'
+                    }))
+                }
             });
 
             // Send current video state to new user
             socket.emit('video_state', {
-                currentVideo: room.currentVideo,
-                isPlaying: room.isPlaying
+                currentVideo: roomState.currentVideo,
+                isPlaying: roomState.isPlaying,
+                currentTime: calculateCurrentTime(roomState)
             });
         } catch (error) {
             console.error('Error joining room:', error);
@@ -36,8 +62,16 @@ const handleSocketConnection = (io, socket) => {
     // Leave room
     socket.on('leave_room', async ({ roomId, userId }) => {
         try {
+            const roomState = roomStates.get(roomId);
+            if (roomState) {
+                roomState.participants.delete(userId);
+                if (roomState.participants.size === 0) {
+                    roomStates.delete(roomId);
+                }
+            }
+
             socket.leave(roomId);
-            socket.to(roomId).emit('user_left', { userId });
+            io.to(roomId).emit('user_left', { userId });
         } catch (error) {
             console.error('Error leaving room:', error);
             socket.emit('error', { message: 'Server error' });
@@ -46,23 +80,43 @@ const handleSocketConnection = (io, socket) => {
 
     // Video control events
     socket.on('video_play', ({ roomId, currentTime }) => {
-        socket.to(roomId).emit('video_play', { currentTime });
+        const roomState = roomStates.get(roomId);
+        if (roomState) {
+            roomState.isPlaying = true;
+            roomState.currentTime = currentTime;
+            roomState.lastUpdate = Date.now();
+            socket.to(roomId).emit('video_play', { currentTime });
+        }
     });
 
     socket.on('video_pause', ({ roomId, currentTime }) => {
-        socket.to(roomId).emit('video_pause', { currentTime });
+        const roomState = roomStates.get(roomId);
+        if (roomState) {
+            roomState.isPlaying = false;
+            roomState.currentTime = currentTime;
+            roomState.lastUpdate = Date.now();
+            socket.to(roomId).emit('video_pause', { currentTime });
+        }
     });
 
     socket.on('video_seek', ({ roomId, currentTime }) => {
-        socket.to(roomId).emit('video_seek', { currentTime });
+        const roomState = roomStates.get(roomId);
+        if (roomState) {
+            roomState.currentTime = currentTime;
+            roomState.lastUpdate = Date.now();
+            socket.to(roomId).emit('video_seek', { currentTime });
+        }
     });
 
-    socket.on('video_buffer', ({ roomId }) => {
-        socket.to(roomId).emit('video_buffer');
-    });
-
-    socket.on('video_buffered', ({ roomId }) => {
-        socket.to(roomId).emit('video_buffered');
+    // Time synchronization
+    socket.on('time_sync', ({ roomId, currentTime }) => {
+        const roomState = roomStates.get(roomId);
+        if (roomState) {
+            const serverTime = calculateCurrentTime(roomState);
+            if (Math.abs(serverTime - currentTime) > 2) { // 2 seconds threshold
+                socket.emit('sync_time', { currentTime: serverTime });
+            }
+        }
     });
 
     // Change video
@@ -70,16 +124,21 @@ const handleSocketConnection = (io, socket) => {
         try {
             const room = await Room.findOne({ roomId });
             if (room) {
-                room.currentVideo = {
-                    ...videoData,
-                    currentTime: 0
-                };
-                room.isPlaying = false;
+                const roomState = roomStates.get(roomId);
+                if (roomState) {
+                    roomState.currentVideo = videoData;
+                    roomState.currentTime = 0;
+                    roomState.isPlaying = false;
+                    roomState.lastUpdate = Date.now();
+                }
+
+                room.currentVideo = videoData;
                 await room.save();
 
-                io.to(roomId).emit('video_changed', {
-                    currentVideo: room.currentVideo,
-                    isPlaying: room.isPlaying
+                io.to(roomId).emit('video_state', {
+                    currentVideo: videoData,
+                    isPlaying: false,
+                    currentTime: 0
                 });
             }
         } catch (error) {
@@ -97,20 +156,18 @@ const handleSocketConnection = (io, socket) => {
         });
     });
 
-    // Video sync request
-    socket.on('request_sync', ({ roomId }) => {
-        socket.to(roomId).emit('sync_requested');
-    });
-
-    // Video sync response
-    socket.on('sync_response', ({ roomId, currentTime, isPlaying }) => {
-        socket.to(roomId).emit('sync_received', { currentTime, isPlaying });
-    });
-
     // Handle disconnection
     socket.on('disconnect', () => {
         console.log('Client disconnected:', socket.id);
     });
 };
+
+// Helper function to calculate current video time
+function calculateCurrentTime(roomState) {
+    if (!roomState.isPlaying) return roomState.currentTime;
+    
+    const timePassed = (Date.now() - roomState.lastUpdate) / 1000;
+    return roomState.currentTime + timePassed;
+}
 
 module.exports = { handleSocketConnection }; 
