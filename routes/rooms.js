@@ -4,6 +4,7 @@ const { v4: uuidv4 } = require('uuid');
 const auth = require('../middleware/auth');
 const Room = require('../models/Room');
 const User = require('../models/User');
+const path = require('path');
 
 // Create a new room
 router.post('/', auth, async (req, res) => {
@@ -17,7 +18,9 @@ router.post('/', auth, async (req, res) => {
             host: req.user.userId,
             isPrivate: isPrivate || true,
             password: password || null,
-            participants: [req.user.userId]
+            participants: [req.user.userId],
+            currentVideo: null,
+            isPlaying: false
         });
 
         await room.save();
@@ -34,6 +37,25 @@ router.post('/', auth, async (req, res) => {
 
 // Get room by ID
 router.get('/:roomId', auth, async (req, res) => {
+    try {
+        const room = await Room.findOne({ roomId: req.params.roomId })
+            .populate('host', 'username email')
+            .populate('participants', 'username email');
+
+        if (!room) {
+            return res.status(404).json({ message: 'Room not found' });
+        }
+
+        // Send room.html for room routes
+        res.sendFile(path.join(__dirname, '..', 'public', 'room.html'));
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// Get room data
+router.get('/:roomId/data', auth, async (req, res) => {
     try {
         const room = await Room.findOne({ roomId: req.params.roomId })
             .populate('host', 'username email')
@@ -72,7 +94,7 @@ router.post('/:roomId/join', auth, async (req, res) => {
         // Update user's active room
         await User.findByIdAndUpdate(req.user.userId, { activeRoom: room.roomId });
 
-        res.json({ message: 'Joined room successfully' });
+        res.json({ message: 'Joined room successfully', room });
     } catch (error) {
         console.error(error);
         res.status(500).json({ message: 'Server error' });
